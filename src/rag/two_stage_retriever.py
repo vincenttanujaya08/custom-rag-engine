@@ -2,8 +2,6 @@ import logging
 import time
 from typing import Optional
 
-import torch
-
 from src.rag.cross_encoder import RawCrossEncoder
 from src.rag.bm25_engine import RawBM25
 from src.rag.hnsw_store import HNSWVectorStore
@@ -66,6 +64,7 @@ class TwoStageRetriever:
                 "text": fused[idx]["text"],
                 "score": round(float(score), 6),
                 "original_index": idx,
+                "chunk_id": fused[idx].get("index", idx),
             })
 
         return {

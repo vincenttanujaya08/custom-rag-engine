@@ -1,11 +1,9 @@
-import json
 import logging
 import math
 import pickle
 import re
 from collections import Counter
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 

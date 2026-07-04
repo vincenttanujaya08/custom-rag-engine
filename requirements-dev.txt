@@ -1,0 +1,4 @@
+# CI and development dependencies (excludes llama-cpp-python for CI speed)
+pytest>=7.0.0
+flake8>=7.0.0
+prometheus-client>=0.25.0

@@ -28,7 +28,7 @@ def reciprocal_rank_fusion(
             text = r["text"]
             ridx = r.get("index", id(r))
             if ridx == idx and text not in seen_texts:
-                fused.append({"text": text, "score": round(score, 6)})
+                fused.append({"text": text, "score": round(score, 6), "index": int(ridx)})
                 seen_texts.add(text)
                 break
         if len(fused) >= top_k:

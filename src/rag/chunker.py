@@ -1,6 +1,5 @@
 import logging
 import re
-from typing import Optional
 
 import torch
 
@@ -73,7 +72,7 @@ class SemanticChunker:
             if sent_tokens > self.max_tokens:
                 words = sent.split()
                 for i in range(0, len(words), 64):
-                    sub = " ".join(words[i : i + 64])
+                    sub = " ".join(words[i:i + 64])
                     chunks.append(sub)
             else:
                 current.append(sent)

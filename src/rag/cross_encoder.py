@@ -52,7 +52,7 @@ class RawCrossEncoder:
         all_scores: list[float] = []
 
         for start in range(0, len(candidates), self.batch_size):
-            batch = candidates[start : start + self.batch_size]
+            batch = candidates[start:start + self.batch_size]
             pairs = [[query, doc] for doc in batch]
 
             encoded = self.tokenizer(

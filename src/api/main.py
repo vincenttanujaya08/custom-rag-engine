@@ -1,13 +1,23 @@
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from prometheus_client import generate_latest, REGISTRY
+
+from src.api.metrics import (
+    metrics_middleware,
+    retrieval_latency,
+    rerank_latency,
+    llm_tokens_generated,
+    active_tenants,
+)
 from src.api.schemas import QueryRequest, RAGResponse, IngestRequest, IngestResponse
 from src.api.generator import async_generate_stream
 from src.inference.llama_engine import LocalLLMEngine
@@ -35,6 +45,7 @@ bm25: RawBM25 = None
 hnsw_store: HNSWVectorStore = None
 sqlite_store: SQLiteStore = None
 retriever: TwoStageRetriever = None
+_observed_tenants: set[str] = set()
 
 
 def _persist_path(name: str) -> str:
@@ -73,6 +84,10 @@ async def lifespan(app: FastAPI):
         hnsw_store.load(hnsw_path)
         bm25.load(bm25_path)
         logger.info(f"Restored: HNSW={len(hnsw_store.chunks)} chunks, BM25={len(bm25.chunks)} chunks")
+
+        users = set(c["user_id"] for c in sqlite_store.get_all_chunks())
+        active_tenants.set(len(users))
+        _observed_tenants.update(users)
     else:
         logger.info("No persisted state found, starting fresh")
 
@@ -99,7 +114,7 @@ async def lifespan(app: FastAPI):
     logger.info("State persisted.")
 
 
-app = FastAPI(title="Custom RAG Engine", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Custom RAG Engine", version="3.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -108,6 +123,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.middleware("http")(metrics_middleware)
 
 
 @app.post("/api/v1/chat")
@@ -124,7 +141,19 @@ async def chat_endpoint(req: QueryRequest) -> RAGResponse:
         user_id=req.user_id,
         allowed_indices=allowed,
     )
+    t0 = time.perf_counter()
     answer = engine.generate(result["prompt"], max_tokens=req.max_tokens)
+    gen_time = time.perf_counter() - t0
+
+    tokens_in_answer = len(answer.split())
+    llm_tokens_generated.inc(tokens_in_answer)
+    logger.info(f"Generated {tokens_in_answer} tokens in {gen_time:.2f}s")
+
+    if "retrieval_latency_s" in result:
+        retrieval_latency.observe(result["retrieval_latency_s"])
+    if "rerank_latency_s" in result:
+        rerank_latency.observe(result["rerank_latency_s"])
+
     return RAGResponse(answer=answer, sources=result["chunks_used"])
 
 
@@ -143,9 +172,17 @@ async def stream_endpoint(req: QueryRequest):
         allowed_indices=allowed,
     )
 
+    if "retrieval_latency_s" in result:
+        retrieval_latency.observe(result["retrieval_latency_s"])
+    if "rerank_latency_s" in result:
+        rerank_latency.observe(result["rerank_latency_s"])
+
     async def event_stream():
+        token_count = 0
         async for token in async_generate_stream(engine, result["prompt"], max_tokens=req.max_tokens):
+            token_count += 1
             yield f"data: {json.dumps({'token': token, 'is_end': False})}\n\n"
+        llm_tokens_generated.inc(token_count)
         yield f"data: {json.dumps({'token': '', 'is_end': True, 'sources': result['chunks_used']})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -154,7 +191,7 @@ async def stream_endpoint(req: QueryRequest):
 @app.post("/api/v1/ingest")
 async def ingest_endpoint(req: IngestRequest) -> IngestResponse:
     from src.rag.chunker import SemanticChunker
-    chunker = SemanticChunker()
+    chunker = SemanticChunker(embedder)
     all_chunks: list[str] = []
     for doc in req.documents:
         chunks = chunker.chunk(doc)
@@ -176,6 +213,9 @@ async def ingest_endpoint(req: IngestRequest) -> IngestResponse:
     hnsw_store.save(_persist_path("hnsw_index"))
     bm25.save(_persist_path("bm25_state"))
 
+    _observed_tenants.add(req.user_id)
+    active_tenants.set(len(_observed_tenants))
+
     logger.info(f"Ingested {len(all_chunks)} chunks for user '{req.user_id}'")
     return IngestResponse(chunks_ingested=len(all_chunks), user_id=req.user_id)
 
@@ -183,6 +223,11 @@ async def ingest_endpoint(req: IngestRequest) -> IngestResponse:
 @app.get("/api/v1/health")
 async def health():
     return {"status": "ok", "engine": engine.device_info if engine else "not loaded"}
+
+
+@app.get("/metrics")
+async def metrics():
+    return PlainTextResponse(generate_latest(REGISTRY), media_type="text/plain; version=0.0.4")
 
 
 frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend"
