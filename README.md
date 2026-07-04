@@ -10,6 +10,8 @@ Full-stack RAG engine built entirely from scratch using raw PyTorch tensor math,
 
 4. **Achieved ~22 ms per-token streaming latency by building an async FastAPI gateway (SSE) and zero-dependency JS dashboard, containerized via Docker with CUDA 12.2 passthrough for real-time pipeline observability.**
 
+5. **Upgraded retrieval to hybrid search (dense + sparse) with BM25 from scratch (raw `numpy` IDF/TF scoring) and HNSW ANN (`hnswlib`, O(log N) search), fused via Reciprocal Rank Fusion (RRF) for precise keyword-aware retrieval.**
+
 ---
 
 ## Architecture Overview
@@ -22,10 +24,14 @@ User Input
     |
     v
 [RAG Orchestrator]
-    |--- [RawEmbedder]       -- sentence-transformers via raw HuggingFace transformers
-    |--- [PyTorchVectorStore] -- cosine similarity with raw tensor math
-    |--- [ContextPruner]      -- greedy token-budget packing
-    |--- [PromptBuilder]      -- raw f-string template assembly
+    |
+    |--- [Hybrid Fusion] -- RRF merge of BM25 + HNSW
+    |       |--- [RawBM25]        -- sparse keyword search (numpy IDF/TF)
+    |       |--- [HNSWVectorStore] -- dense ANN search (hnswlib, O(log N))
+    |       |--- [RawEmbedder]    -- query embedding via manual mean-pooling
+    |
+    |--- [ContextPruner]  -- greedy token-budget packing
+    |--- [PromptBuilder]  -- raw f-string template assembly
     |
     v
 [LocalLLMEngine] -- llama-cpp-python with GPU acceleration
@@ -53,6 +59,9 @@ custom-rag-engine/
             embeddings.py       -- RawEmbedder: manual mean-pooling, no sentence-transformers wrapper
             chunker.py          -- SemanticChunker: cosine-similarity divergence boundaries
             vector_store.py     -- PyTorchVectorStore: raw matmul/norm cosine search
+            bm25_engine.py      -- RawBM25: sparse keyword search from scratch (numpy)
+            hnsw_store.py       -- HNSWVectorStore: ANN dense search (hnswlib)
+            hybrid_fusion.py    -- Reciprocal Rank Fusion: merges BM25 + HNSW results
             token_counter.py    -- TokenCounter: exact LLM tokenization
             context_pruner.py   -- ContextPruner: greedy budget algorithm
             prompt_builder.py   -- PromptBuilder: ChatML / Llama-3 raw templates
@@ -72,6 +81,7 @@ custom-rag-engine/
         test_context_pruning.py -- Phase 3 budget algorithm validation
         test_api.py             -- Phase 4 streaming API test
         test_docker.sh          -- Docker build helper
+        benchmark_hybrid.py     -- Phase 6 hybrid search benchmark
 ```
 
 ---
@@ -268,6 +278,9 @@ python scripts/test_api.py
 
 # Phase 5 -- Docker build verification
 bash scripts/test_docker.sh
+
+# Phase 6 -- Hybrid search benchmark
+python scripts/benchmark_hybrid.py
 ```
 
 ---
@@ -309,6 +322,35 @@ data: {"token": "", "is_end": true, "sources": []}
 
 ---
 
+### Phase 6 -- Hybrid Retrieval (BM25 + HNSW + RRF)
+
+**`src/rag/bm25_engine.py`** - `RawBM25`
+
+Full BM25+ implementation from scratch using raw `numpy` vectorized operations. Tokenizes with `re.findall`, computes IDF using the standard formula `log(1 + (N - n + 0.5) / (n + 0.5))`, and scores using the BM25+ formula with configurable `k1`, `b`, and `delta` parameters. No `rank_bm25` or `elasticsearch` libraries.
+
+**`src/rag/hnsw_store.py`** - `HNSWVectorStore`
+
+Replaces brute-force O(N) dense search with Approximate Nearest Neighbors via `hnswlib`. Uses cosine distance and configurable `ef_construction`, `M`, and `ef` parameters. Scales to millions of vectors with O(log N) search time. Converts PyTorch tensors to `numpy` arrays for hnswlib.
+
+**`src/rag/hybrid_fusion.py`** - `reciprocal_rank_fusion`
+
+Implements the standard RRF formula to merge sparse (BM25) and dense (HNSW) result sets:
+
+```
+score(d) = sum(1 / (k + rank_i(d)))  for each result list i
+```
+
+The `k` parameter (default 60) controls how aggressively low-ranked results are penalized. Results are deduplicated by text content and re-sorted by RRF score.
+
+**`scripts/benchmark_hybrid.py`** - Hybrid Benchmark
+
+Creates a 100-chunk dataset with rare keywords ("Project X99 Alpha"), verifies:
+1. BM25 ranks the rare-keyword chunk at #1 (exact keyword match)
+2. Hybrid RRF also ranks it at #1
+3. Latency comparison between brute-force O(N) and HNSW O(log N) search
+
+---
+
 ## Configuration
 
 Key parameters that can be adjusted:
@@ -335,6 +377,10 @@ Key parameters that can be adjusted:
 **Why greedy packing instead of knapsack optimization?** The greedy algorithm (sort by score, accept if it fits) runs in O(n log n) and produces near-optimal results for the vast majority of RAG use cases. A full knapsack solver would add complexity without meaningful quality gains.
 
 **Why POST for SSE instead of GET?** The streaming endpoint accepts a JSON payload (query, parameters). Native `EventSource` only supports GET requests, so the frontend uses `fetch` with `ReadableStream` to consume POST-based SSE events.
+
+**Why hybrid (BM25 + dense) instead of dense-only?** Dense embeddings capture semantic similarity but dilute rare or exact keyword matches. BM25 guarantees that documents containing the exact query terms rank highly. RRF merges the two without training, combining the precision of sparse search with the recall of dense search.
+
+**Why hnswlib instead of FAISS?** hnswlib is a minimal C++ binding with zero Python overhead -- no framework abstractions, no data preparation pipeline. It compiles in seconds and exposes exactly two operations: `add_items` and `knn_query`. This aligns with the "hard-mode" philosophy of using raw, minimal dependencies.
 
 ---
 
