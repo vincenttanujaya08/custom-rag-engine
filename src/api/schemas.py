@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from typing import Optional
 
 
 class QueryRequest(BaseModel):
@@ -6,6 +7,8 @@ class QueryRequest(BaseModel):
     top_k: int = 5
     threshold: float = 0.5
     max_tokens: int = 512
+    user_id: Optional[str] = None
+    use_reranker: bool = False
 
 
 class RAGResponse(BaseModel):
@@ -16,3 +19,13 @@ class RAGResponse(BaseModel):
 class StreamChunk(BaseModel):
     token: str
     is_end: bool = False
+
+
+class IngestRequest(BaseModel):
+    user_id: str
+    documents: list[str]
+
+
+class IngestResponse(BaseModel):
+    chunks_ingested: int
+    user_id: str

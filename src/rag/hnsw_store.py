@@ -1,4 +1,6 @@
+import json
 import logging
+from pathlib import Path
 from typing import Optional
 
 import hnswlib
@@ -30,7 +32,7 @@ class HNSWVectorStore:
         self.next_id += len(chunks)
         logger.info(f"HNSW store now has {len(self.chunks)} chunks")
 
-    def search(self, query_embedding: torch.Tensor, top_k: int = 10) -> list[dict]:
+    def search(self, query_embedding: torch.Tensor, top_k: int = 10, user_id: Optional[str] = None) -> list[dict]:
         if self.next_id == 0:
             return []
 
@@ -48,3 +50,39 @@ class HNSWVectorStore:
             results.append({"text": self.chunks[idx], "score": score, "index": int(idx)})
 
         return results
+
+    def save(self, path: str):
+        save_dir = Path(path).parent
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        index_path = f"{path}.bin"
+        meta_path = f"{path}.json"
+
+        self.index.save_index(index_path)
+
+        meta = {
+            "chunks": self.chunks,
+            "next_id": self.next_id,
+            "dim": self.dim,
+        }
+        with open(meta_path, "w") as f:
+            json.dump(meta, f)
+
+        logger.info(f"HNSW store saved to {path}.* ({len(self.chunks)} chunks)")
+
+    def load(self, path: str):
+        index_path = f"{path}.bin"
+        meta_path = f"{path}.json"
+
+        with open(meta_path) as f:
+            meta = json.load(f)
+
+        self.dim = meta["dim"]
+        self.chunks = meta["chunks"]
+        self.next_id = meta["next_id"]
+
+        self.index = hnswlib.Index(space="cosine", dim=self.dim)
+        self.index.load_index(index_path)
+        self.index.set_ef(50)
+
+        logger.info(f"HNSW store loaded from {path}.* ({len(self.chunks)} chunks)")

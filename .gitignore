@@ -29,3 +29,6 @@ Thumbs.db
 
 # Docker
 .dockerignore
+
+# Runtime data (sqlite, hnsw, bm25 state)
+data/

@@ -1,7 +1,11 @@
+import json
 import logging
 import math
+import pickle
 import re
 from collections import Counter
+from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -80,3 +84,40 @@ class RawBM25:
             results.append({"text": self.chunks[idx], "score": round(float(s), 6), "index": int(idx)})
 
         return results
+
+    def save(self, path: str):
+        save_dir = Path(path).parent
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        state = {
+            "k1": self.k1,
+            "b": self.b,
+            "delta": self.delta,
+            "chunks": self.chunks,
+            "doc_freqs": [dict(f) for f in self.doc_freqs],
+            "idf": self.idf,
+            "avg_dl": self.avg_dl,
+            "vocab": self.vocab,
+            "_built": self._built,
+        }
+
+        with open(f"{path}.pkl", "wb") as f:
+            pickle.dump(state, f)
+
+        logger.info(f"BM25 saved to {path}.pkl ({len(self.chunks)} chunks)")
+
+    def load(self, path: str):
+        with open(f"{path}.pkl", "rb") as f:
+            state = pickle.load(f)
+
+        self.k1 = state["k1"]
+        self.b = state["b"]
+        self.delta = state["delta"]
+        self.chunks = state["chunks"]
+        self.doc_freqs = [Counter(d) for d in state["doc_freqs"]]
+        self.idf = state["idf"]
+        self.avg_dl = state["avg_dl"]
+        self.vocab = state["vocab"]
+        self._built = state["_built"]
+
+        logger.info(f"BM25 loaded from {path}.pkl ({len(self.chunks)} chunks)")

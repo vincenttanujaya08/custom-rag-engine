@@ -1,16 +1,10 @@
 import logging
 from typing import Optional
 
-import torch
-
 from src.rag.token_counter import TokenCounter
 from src.rag.context_pruner import ContextPruner
 from src.rag.prompt_builder import PromptBuilder
-from src.rag.embeddings import RawEmbedder
-from src.rag.vector_store import PyTorchVectorStore
-from src.rag.bm25_engine import RawBM25
-from src.rag.hnsw_store import HNSWVectorStore
-from src.rag.hybrid_fusion import reciprocal_rank_fusion
+from src.rag.two_stage_retriever import TwoStageRetriever
 
 logger = logging.getLogger(__name__)
 
@@ -18,42 +12,39 @@ logger = logging.getLogger(__name__)
 class RAGPipeline:
     def __init__(
         self,
-        embedder: RawEmbedder,
-        vector_store: PyTorchVectorStore,
         token_counter: TokenCounter,
         pruner: ContextPruner,
         prompt_builder: PromptBuilder,
-        bm25: Optional[RawBM25] = None,
-        hnsw_store: Optional[HNSWVectorStore] = None,
-        enable_hybrid: bool = False,
+        retriever: Optional[TwoStageRetriever] = None,
+        use_reranker: bool = False,
     ):
-        self.embedder = embedder
-        self.vector_store = vector_store
         self.token_counter = token_counter
         self.pruner = pruner
         self.prompt_builder = prompt_builder
-        self.bm25 = bm25
-        self.hnsw_store = hnsw_store
-        self.enable_hybrid = enable_hybrid
+        self.retriever = retriever
+        self.use_reranker = use_reranker
 
     def query(
         self,
         user_query: str,
         top_k: int = 5,
-        threshold: float = 0.5,
         max_generation_tokens: int = 512,
         system_prompt: str = "You are a helpful assistant. Use the provided context to answer accurately.",
+        user_id: Optional[str] = None,
+        allowed_indices: Optional[set[int]] = None,
     ) -> dict:
-        if self.enable_hybrid and self.bm25 and self.hnsw_store:
-            bm25_hits = self.bm25.search(user_query, top_k=top_k * 10)
-            query_emb = self.embedder.embed_texts([user_query])
-            hnsw_hits = self.hnsw_store.search(query_emb.squeeze(0), top_k=top_k * 10)
-            retrieved = reciprocal_rank_fusion(bm25_hits, hnsw_hits, top_k=top_k)
-            logger.info(f"Hybrid search: BM25={len(bm25_hits)}, HNSW={len(hnsw_hits)}, fused={len(retrieved)}")
+        if self.retriever:
+            result = self.retriever.retrieve(
+                user_query,
+                top_k=top_k,
+                user_id=user_id,
+                allowed_indices=allowed_indices,
+            )
+            retrieved = result["reranked"] if self.use_reranker else result["candidates"][:top_k]
+            logger.info(f"Retrieved {len(retrieved)} chunks (reranked={self.use_reranker})")
         else:
-            query_emb = self.embedder.embed_texts([user_query])
-            retrieved = self.vector_store.search(query_emb, top_k=top_k, threshold=threshold)
-            logger.info(f"Dense search retrieved {len(retrieved)} chunks")
+            retrieved = []
+            logger.warning("No retriever configured")
 
         pruned = self.pruner.prune_and_pack(
             system_prompt=system_prompt,
