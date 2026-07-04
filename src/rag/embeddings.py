@@ -38,14 +38,23 @@ class RawEmbedder:
         logger.info(f"Embedding model loaded. Dim: {self.embedding_dim}")
 
     @torch.no_grad()
-    def embed_texts(self, texts: list[str]) -> torch.Tensor:
-        encoded = self.tokenizer(
-            texts, padding=True, truncation=True, return_tensors="pt",
-        )
-        input_ids = encoded["input_ids"].to(self.device)
-        attention_mask = encoded["attention_mask"].to(self.device)
+    def embed_texts(self, texts: list[str], batch_size: Optional[int] = None) -> torch.Tensor:
+        if batch_size is None:
+            batch_size = len(texts)
 
-        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-        embeddings = mean_pooling(outputs.last_hidden_state, attention_mask)
-        embeddings = torch.nn.functional.normalize(embeddings, p=2, dim=1)
-        return embeddings.cpu()
+        all_embeddings: list[torch.Tensor] = []
+
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start:start + batch_size]
+            encoded = self.tokenizer(
+                batch, padding=True, truncation=True, return_tensors="pt",
+            )
+            input_ids = encoded["input_ids"].to(self.device)
+            attention_mask = encoded["attention_mask"].to(self.device)
+
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            batch_emb = mean_pooling(outputs.last_hidden_state, attention_mask)
+            batch_emb = torch.nn.functional.normalize(batch_emb, p=2, dim=1)
+            all_embeddings.append(batch_emb.cpu())
+
+        return torch.cat(all_embeddings, dim=0)
